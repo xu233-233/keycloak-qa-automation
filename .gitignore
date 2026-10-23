@@ -11,7 +11,8 @@ __pycache__/
 # 测试产物（如需在仓库保留报告，可注释掉对应行）
 allure-results/
 allure-report/
-junit-*.xml
+# pytest 产物（只忽略根目录生成的报告，ci/samples 下的样例要保留）
+/junit-*.xml
 
 # Jenkins 工作目录
 .jenkins/

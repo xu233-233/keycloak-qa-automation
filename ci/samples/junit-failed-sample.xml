@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 联调样例：故意包含失败用例，用于验证 ci/zentao_sync.py 的解析与建单逻辑，
+     不必真的把项目跑挂。运行方式见 ci/zentao_sync.py 的 help 说明。 -->
+<testsuites>
+  <testsuite name="pytest" errors="0" failures="2" skipped="1" tests="4">
+    <testcase classname="tests.test_security" name="test_no_token_returns_401" time="0.01" />
+    <testcase classname="tests.test_security" name="test_tampered_jwt_returns_401" time="0.02">
+      <failure message="assert 200 == 401">E   assert 200 == 401
+E    +  where 200 = &lt;Response [200]&gt;.status_code</failure>
+    </testcase>
+    <testcase classname="tests.test_user_lifecycle" name="test_duplicate_username_conflict" time="0.03">
+      <failure message="KeyError: 'Location'">self = &lt;KeycloakClient&gt;
+&gt;       resp.headers["Location"]
+E       KeyError: 'Location'</failure>
+    </testcase>
+    <testcase classname="tests.test_user_lifecycle" name="test_created_user_in_list" time="0.0">
+      <skipped message="need realm" />
+    </testcase>
+  </testsuite>
+</testsuites>
