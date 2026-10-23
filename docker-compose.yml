@@ -1,0 +1,17 @@
+# Keycloak 26.8.0 被测系统（测试环境：dev 模式，内置 H2，零配置）
+# 启动：docker compose up -d
+# 管理后台：http://localhost:8080   （账号 admin / admin）
+# 说明：start-dev 仅用于本地测试，启用 HTTP 与内置库；上线/压测前可改为 start 并接 PostgreSQL。
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.0
+    container_name: keycloak-qa
+    command: start-dev
+    environment:
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    ports:
+      - "8080:8080"
+    restart: unless-stopped

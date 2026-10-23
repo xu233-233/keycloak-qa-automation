@@ -1,0 +1,5 @@
+requests>=2.31,<3
+pytest>=8.0,<9
+playwright>=1.48
+pytest-playwright>=0.5
+allure-pytest>=2.13

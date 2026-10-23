@@ -1,0 +1,30 @@
+# 密钥 / 环境
+.env
+*.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# 测试产物（如需在仓库保留报告，可注释掉对应行）
+allure-results/
+allure-report/
+junit-*.xml
+
+# Jenkins 工作目录
+.jenkins/
+
+# 本地辅助/笔记目录（不对外发布）
+.workbuddy/
+.deepeval/
+
+# JMeter 压测产物
+perf/*.jtl
+perf/report/
+jmeter.log
+
+# IDE
+.idea/
+.vscode/
