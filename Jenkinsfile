@@ -34,8 +34,10 @@ pipeline {
         KC_MASTER_USER     = 'admin'
         KC_MASTER_PASSWORD = 'admin'
         PYTHONUTF8         = '1'
-        // 走国内 PyPI 镜像，避免首次构建 pip 安装超时
-        PIP_INDEX_URL      = 'https://pypi.tuna.tsinghua.edu.cn/simple'
+        // 走国内 PyPI 镜像，避免首次构建 pip 安装超时。
+        // 注意：清华源与 pip 26.1.2 不兼容（能连通但解析不出任何版本，报
+        // "from versions: none"），实测阿里云/腾讯云/官方 pypi 均正常，故用阿里云。
+        PIP_INDEX_URL      = 'https://mirrors.aliyun.com/pypi/simple'
     }
 
     stages {
