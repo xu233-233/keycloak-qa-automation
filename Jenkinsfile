@@ -13,7 +13,8 @@ pipeline {
     agent any
 
     options {
-        timestamps()
+        // 说明：timestamps() 依赖 Timestamper 插件，本机未装故不用；
+        // 如需日志带时间戳，装 Timestamper 后加回 timestamps()
         timeout(time: 30, unit: 'MINUTES')
         buildDiscarder(logRotator(numToKeepStr: '20'))
     }
