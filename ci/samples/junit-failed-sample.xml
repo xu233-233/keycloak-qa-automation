@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- 联调样例：故意包含失败用例，用于验证 ci/zentao_sync.py 的解析与建单逻辑，
-     不必真的把项目跑挂。运行方式见 ci/zentao_sync.py 的 help 说明。 -->
+     不必真的把项目跑挂。运行方式见 ci/zentao_sync.py 的 help 说明。
+     这个文件同时覆盖四种情况：通过 / 失败但禅道已有单(会被去重跳过) / 失败且是新单 / 跳过。 -->
 <testsuites>
-  <testsuite name="pytest" errors="0" failures="2" skipped="1" tests="4">
+  <testsuite name="pytest" errors="0" failures="3" skipped="1" tests="5">
     <testcase classname="tests.test_security" name="test_no_token_returns_401" time="0.01" />
     <testcase classname="tests.test_security" name="test_tampered_jwt_returns_401" time="0.02">
       <failure message="assert 200 == 401">E   assert 200 == 401
@@ -15,6 +16,10 @@ E       KeyError: 'Location'</failure>
     </testcase>
     <testcase classname="tests.test_user_lifecycle" name="test_created_user_in_list" time="0.0">
       <skipped message="need realm" />
+    </testcase>
+    <testcase classname="tests.test_demo" name="test_new_bug_demo" time="0.01">
+      <failure message="演示用：这条会新建一条禅道 Bug">E   AssertionError: demo failure
+E   仅用于验证「新建」分支，跑完可直接在禅道里删掉这条 Bug</failure>
     </testcase>
   </testsuite>
 </testsuites>

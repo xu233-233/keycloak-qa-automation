@@ -138,8 +138,9 @@ pipeline {
                         call .venv\\Scripts\\activate.bat
                         set "JUNIT=%JUNIT_FILE%"
                         if "%JUNIT%"=="" set "JUNIT=junit-api.xml"
+                        echo [INFO] sync source: %JUNIT%
                         if not exist "%JUNIT%" (
-                            echo [跳过] 未产出 %JUNIT%，本次不建单
+                            echo [SKIP] %JUNIT% not found, nothing to sync
                             exit /b 0
                         )
                         python ci\\zentao_sync.py --junit "%JUNIT%" --apply
