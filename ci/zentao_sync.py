@@ -42,7 +42,9 @@ def load_dotenv(path: str | None = None) -> None:
         path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
     if not os.path.exists(path):
         return
-    with open(path, encoding="utf-8") as fh:
+    # utf-8-sig：Windows 记事本 / PowerShell 5.1 写出的 UTF-8 常带 BOM，
+    # 用 utf-8 读会让第一个键变成 "\ufeffZENTAO_URL" 从而匹配不上
+    with open(path, encoding="utf-8-sig") as fh:
         for raw in fh:
             line = raw.strip()
             if not line or line.startswith("#") or "=" not in line:
@@ -135,7 +137,7 @@ def zentao_login(base: str, account: str, password: str) -> str:
         json={"account": account, "password": password},
         timeout=10,
     )
-    resp.raise_for_status()
+    # 不先 raise_for_status：禅道 400 时 body 里通常带具体原因，先解析再决定
     try:
         data = resp.json()
     except ValueError:
@@ -143,11 +145,11 @@ def zentao_login(base: str, account: str, password: str) -> str:
 
     # 禅道把「账号密码错」也返回 200 + error 字段，需显式判断
     if data.get("error"):
-        raise RuntimeError(f"禅道返回错误：{data['error']}")
+        raise RuntimeError(f"禅道返回错误：{data['error']}（HTTP {resp.status_code}）")
 
     token = data.get("token")
     if not token:
-        raise RuntimeError(f"登录未返回 token：{data}")
+        raise RuntimeError(f"HTTP {resp.status_code}，未返回 token：{resp.text[:200]}")
     return token
 
 
