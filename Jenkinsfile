@@ -43,8 +43,6 @@ pipeline {
         // 因为 .env 已被 .gitignore 排除，Jenkins 从 GitHub 检出的 workspace 里没有它。
         ZENTAO_URL         = 'https://3631395168.chandao.net'
         ZENTAO_PRODUCT     = '1'
-        // params.JUNIT_FILE 首次解析前可能为 null，兜底回默认值
-        JUNIT_FILE         = "${params.JUNIT_FILE ?: 'junit-api.xml'}"
     }
 
     stages {
@@ -138,11 +136,13 @@ pipeline {
                 )]) {
                     bat '''
                         call .venv\\Scripts\\activate.bat
-                        if not exist "%JUNIT_FILE%" (
-                            echo [跳过] 未产出 %JUNIT_FILE%，本次不建单
+                        set "JUNIT=%JUNIT_FILE%"
+                        if "%JUNIT%"=="" set "JUNIT=junit-api.xml"
+                        if not exist "%JUNIT%" (
+                            echo [跳过] 未产出 %JUNIT%，本次不建单
                             exit /b 0
                         )
-                        python ci\\zentao_sync.py --junit "%JUNIT_FILE%" --apply
+                        python ci\\zentao_sync.py --junit "%JUNIT%" --apply
                     '''
                 }
             }
