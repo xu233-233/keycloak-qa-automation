@@ -113,12 +113,25 @@ def parse_junit(path: str) -> dict:
     }
 
 
-def _bug_payload(case: dict, build: str) -> dict:
-    """禅道 Bug 字段。字段名如与你版本不符，在这里改。"""
+def _bug_payload(case: dict, build: str, build_no: str = "", build_url: str = "") -> dict:
+    """禅道 Bug 字段。字段名如与你版本不符，在这里改。
+
+    构建号写进「重现步骤」而不是标题：标题是去重用的键，带上构建号就每次都算新 Bug。
+    """
     title = f"[自动化] {case['classname']}::{case['name']} 失败"
+    if build_no:
+        trace = (
+            f"<p><strong>Jenkins 构建：</strong>"
+            f'<a href="{build_url}">{build_no}</a></p>'
+            if build_url
+            else f"<p><strong>Jenkins 构建：</strong>{build_no}</p>"
+        )
+    else:
+        trace = ""
     steps = (
         f"<p><strong>失败信息：</strong>{case['message']}</p>"
         f"<p><strong>详细堆栈：</strong></p><pre>{case['detail'][:2000]}</pre>"
+        f"{trace}"
         f"<p>来源：Jenkins 自动化流水线 / pytest</p>"
     )
     return {
@@ -165,6 +178,29 @@ def zentao_create_bug(base: str, token: str, product: str, payload: dict) -> dic
     return resp.json()
 
 
+def zentao_list_bugs(base: str, token: str, product: str, limit: int = 1000) -> list[dict]:
+    """拉产品下已有 Bug，供去重用。
+
+    实测（云禅道 18.x）：GET /api.php/v1/products/{id}/bugs
+    返回 {page, total, limit, bugs}，limit 传 1000 会被原样接受，无需翻页。
+    注意：版本（build）是项目维度的（/api.php/v1/builds?project=X），
+    产品维度的 /products/{id}/builds 不存在，别混用。
+    """
+    resp = requests.get(
+        f"{base}/api.php/v1/products/{product}/bugs",
+        params={"limit": limit, "page": 1},
+        headers={"Token": token},
+        timeout=15,
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(f"HTTP {resp.status_code}：{resp.text[:200]}")
+    try:
+        data = resp.json()
+    except ValueError:
+        raise RuntimeError(f"返回的不是 JSON：{resp.text[:200]}")
+    return data.get("bugs") or []
+
+
 def main() -> int:
     load_dotenv()
 
@@ -172,6 +208,7 @@ def main() -> int:
     ap.add_argument("--junit", help="pytest --junitxml 生成的文件（--ping 时可不填）")
     ap.add_argument("--ping", action="store_true", help="只验证禅道登录与配置，不解析用例、不建单")
     ap.add_argument("--apply", action="store_true", help="真正提交到禅道（默认 dry-run）")
+    ap.add_argument("--no-dedup", action="store_true", help="关闭去重：同一用例失败几次就建几条 Bug")
     ap.add_argument("--product", default=os.getenv("ZENTAO_PRODUCT", ""), help="禅道产品 ID")
     ap.add_argument("--build", default=os.getenv("ZENTAO_BUILD", "trunk"), help="影响版本")
     args = ap.parse_args()
@@ -182,6 +219,10 @@ def main() -> int:
         "password": os.getenv("ZENTAO_PASSWORD", ""),
         "product": args.product or os.getenv("ZENTAO_PRODUCT", ""),
     }
+
+    # Jenkins 会自动注入 BUILD_NUMBER / BUILD_URL；本地命令行跑时为空，留空即可
+    build_no = os.getenv("BUILD_NUMBER", "")
+    build_url = os.getenv("BUILD_URL", "")
 
     # --- 模式一：只验证登录（不建单、不污染产品） ---
     if args.ping:
@@ -219,7 +260,7 @@ def main() -> int:
         print(f"  - {c['classname']}::{c['name']}  |  {c['message'][:80]}")
 
     if not args.apply:
-        sample = _bug_payload(summary["failed_cases"][0], args.build)
+        sample = _bug_payload(summary["failed_cases"][0], args.build, build_no, build_url)
         print("\n[dry-run] 首条 Bug 将提交的字段：")
         for k, v in sample.items():
             print(f"  {k} = {str(v).replace(chr(10), ' ')[:90]}")
@@ -236,9 +277,35 @@ def main() -> int:
         return 1
     print(f"\n禅道登录成功，开始提交 {len(summary['failed_cases'])} 个 Bug ...")
 
+    # 去重：同一用例连续失败几轮，会堆出一串一模一样的 Bug。
+    # 这里按标题匹配产品下已有 Bug：仍是「激活」状态的就跳过，
+    # 已解决/已关闭的照常新建（说明修复没生效或又回归了，需要重新开单）。
+    existing: dict[str, dict] = {}
+    if not args.no_dedup:
+        try:
+            existing = {
+                (b.get("title") or "").strip(): b
+                for b in zentao_list_bugs(cfg["base"], token, cfg["product"])
+                if b.get("title")
+            }
+            print(f"禅道已有 Bug {len(existing)} 条，按标题去重（激活中的跳过）")
+        except Exception as exc:  # noqa: BLE001
+            # 去重是锦上添花，拉不到列表不该挡住建单
+            print(f"[WARN] 拉取已有 Bug 失败，本次不去重：{exc}", file=sys.stderr)
+
     created = 0
+    skipped_dup = 0
     for c in summary["failed_cases"]:
-        payload = _bug_payload(c, args.build)
+        payload = _bug_payload(c, args.build, build_no, build_url)
+        old = existing.get(payload["title"])
+        if old is not None:
+            old_status = str(old.get("status", ""))
+            if old_status == "active":
+                print(f"  = {c['name']} 已存在（bug id={old.get('id')}，激活中），跳过")
+                skipped_dup += 1
+                continue
+            label = old.get("statusName") or old_status
+            print(f"  ~ {c['name']} 有同标题旧单 id={old.get('id')}（{label}），本次新建")
         try:
             result = zentao_create_bug(cfg["base"], token, cfg["product"], payload)
             bug_id = (result.get("id") or result.get("bug", {}).get("id"))
@@ -247,8 +314,12 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             print(f"  ✗ {c['name']} 提交失败：{exc}", file=sys.stderr)
 
-    print(f"\n完成：成功提交 {created}/{len(summary['failed_cases'])} 个 Bug。")
-    return 0 if created == len(summary["failed_cases"]) else 1
+    handled = created + skipped_dup
+    print(
+        f"\n完成：新建 {created} 条，跳过重复 {skipped_dup} 条，"
+        f"共 {len(summary['failed_cases'])} 条失败用例。"
+    )
+    return 0 if handled == len(summary["failed_cases"]) else 1
 
 
 if __name__ == "__main__":
