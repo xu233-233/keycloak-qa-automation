@@ -34,6 +34,8 @@ pipeline {
         KC_MASTER_USER     = 'admin'
         KC_MASTER_PASSWORD = 'admin'
         PYTHONUTF8         = '1'
+        // 走国内 PyPI 镜像，避免首次构建 pip 安装超时
+        PIP_INDEX_URL      = 'https://pypi.tuna.tsinghua.edu.cn/simple'
     }
 
     stages {
