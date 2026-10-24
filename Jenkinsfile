@@ -22,8 +22,9 @@ pipeline {
     parameters {
         booleanParam(name: 'RUN_UI',      defaultValue: false, description: '跑 Playwright UI 用例（P4，约 25s）')
         booleanParam(name: 'RUN_PERF',    defaultValue: false, description: '跑 JMeter token 压测（P5）')
-        booleanParam(name: 'SYNC_ZENTAO', defaultValue: false, description: '把失败用例同步到禅道（需先在节点上配好禅道环境变量）')
+        booleanParam(name: 'SYNC_ZENTAO', defaultValue: false, description: '把失败用例提交到禅道（依赖 Jenkins 凭据 zentao-login）')
         string(name: 'PERF_THREADS', defaultValue: '10', description: '压测并发线程数')
+        string(name: 'JUNIT_FILE',   defaultValue: 'junit-api.xml', description: '要同步的 JUnit 文件；联调可填 ci/samples/junit-failed-sample.xml')
     }
 
     environment {
@@ -38,6 +39,12 @@ pipeline {
         // 注意：清华源与 pip 26.1.2 不兼容（能连通但解析不出任何版本，报
         // "from versions: none"），实测阿里云/腾讯云/官方 pypi 均正常，故用阿里云。
         PIP_INDEX_URL      = 'https://mirrors.aliyun.com/pypi/simple'
+        // 禅道的非敏感配置写在流水线里；账号密码走 Jenkins 凭据 zentao-login，
+        // 因为 .env 已被 .gitignore 排除，Jenkins 从 GitHub 检出的 workspace 里没有它。
+        ZENTAO_URL         = 'https://3631395168.chandao.net'
+        ZENTAO_PRODUCT     = '1'
+        // params.JUNIT_FILE 首次解析前可能为 null，兜底回默认值
+        JUNIT_FILE         = "${params.JUNIT_FILE ?: 'junit-api.xml'}"
     }
 
     stages {
@@ -81,22 +88,28 @@ pipeline {
         }
 
         // 接口用例不加 -q，让 Console 里能看到每条用例名，便于定位
+        // catchError：pytest 有失败时只把本 stage 与构建结果标红/黄，不中断流水线，
+        // 否则后面的「同步禅道」永远跑不到 —— 而有失败用例时恰恰最需要同步
         stage('接口用例 P2/P3') {
             steps {
-                bat '''
-                    call .venv\\Scripts\\activate.bat
-                    pytest tests --alluredir=allure-results --junitxml=junit-api.xml
-                '''
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    bat '''
+                        call .venv\\Scripts\\activate.bat
+                        pytest tests --alluredir=allure-results --junitxml=junit-api.xml
+                    '''
+                }
             }
         }
 
         stage('UI 用例 P4') {
             when { expression { params.RUN_UI } }
             steps {
-                bat '''
-                    call .venv\\Scripts\\activate.bat
-                    pytest ui_tests --alluredir=allure-results --junitxml=junit-ui.xml
-                '''
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    bat '''
+                        call .venv\\Scripts\\activate.bat
+                        pytest ui_tests --alluredir=allure-results --junitxml=junit-ui.xml
+                    '''
+                }
             }
         }
 
@@ -114,11 +127,24 @@ pipeline {
         stage('同步禅道') {
             when { expression { params.SYNC_ZENTAO } }
             steps {
-                // 默认 dry-run；确认要真提交时在节点环境变量里配 ZENTAO_* 并加 --apply
-                bat '''
-                    call .venv\\Scripts\\activate.bat
-                    python ci\\zentao_sync.py --junit junit-api.xml
-                '''
+                // 账号密码取自 Jenkins 凭据（Username with password，ID: zentao-login），
+                // withCredentials 会在本 stage 内临时注入 ZENTAO_ACCOUNT / ZENTAO_PASSWORD，
+                // 且控制台日志里会自动打码，不会把明文密码打出来。
+                // 想只看不发（dry-run），把下面的 --apply 去掉即可。
+                withCredentials([usernamePassword(
+                    credentialsId: 'zentao-login',
+                    usernameVariable: 'ZENTAO_ACCOUNT',
+                    passwordVariable: 'ZENTAO_PASSWORD'
+                )]) {
+                    bat '''
+                        call .venv\\Scripts\\activate.bat
+                        if not exist "%JUNIT_FILE%" (
+                            echo [跳过] 未产出 %JUNIT_FILE%，本次不建单
+                            exit /b 0
+                        )
+                        python ci\\zentao_sync.py --junit "%JUNIT_FILE%" --apply
+                    '''
+                }
             }
         }
     }
