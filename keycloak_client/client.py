@@ -9,6 +9,8 @@
 """
 from __future__ import annotations
 
+import json
+
 import requests
 
 
@@ -343,3 +345,98 @@ class KeycloakClient:
             raise KeycloakError(
                 f"提升租户管理员失败 [{resp.status_code}]：{resp.text[:200]}"
             )
+
+    def revoke_realm_admin(self, user_id: str) -> requests.Response:
+        """收回租户管理员权限（撤销 realm-management 的 realm-admin）。"""
+        client = self.get_client_by_client_id("realm-management")
+        role = self.get_client_role(client["id"], "realm-admin")
+        return self.remove_client_roles(user_id, client["id"], [role])
+
+    def assign_composites(self, role: dict, composites: list[dict]) -> requests.Response:
+        """把 composites 并入 role，形成 composite 角色（继承关系）。"""
+        return requests.post(
+            self.admin_url(f"/roles/{role['name']}/composites"),
+            json=composites,
+            headers=self.auth_headers(),
+            timeout=self.timeout,
+            verify=self.verify,
+        )
+
+    def get_effective_realm_roles(self, user_id: str) -> list[dict]:
+        """用户的「有效」realm 角色，已展开 composite 继承。
+
+        为什么不用 token claims 断言：
+        student-qa 的 user profile 被手工调过，access token 只含极简 claims
+        （连 sub 都没有），roles scope 的 mapper 实际没写进 token。
+        用这个接口验证角色生效更可靠，也不受 realm 配置漂移影响。
+        """
+        resp = requests.get(
+            self.admin_url(f"/users/{user_id}/role-mappings/realm/composite"),
+            headers=self.auth_headers(),
+            timeout=self.timeout,
+            verify=self.verify,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_role_mappings(self, user_id: str) -> dict:
+        """一次拿到 realmMappings（realm 角色）与 clientMappings（client 角色）。"""
+        resp = requests.get(
+            self.admin_url(f"/users/{user_id}/role-mappings"),
+            headers=self.auth_headers(),
+            timeout=self.timeout,
+            verify=self.verify,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def remove_client_roles(
+        self, user_id: str, client_uuid: str, roles: list[dict]
+    ) -> requests.Response:
+        return requests.delete(
+            self.admin_url(f"/users/{user_id}/role-mappings/clients/{client_uuid}"),
+            json=roles,
+            headers=self.auth_headers(),
+            timeout=self.timeout,
+            verify=self.verify,
+        )
+
+    def reset_password(
+        self, user_id: str, password: str, temporary: bool = False
+    ) -> requests.Response:
+        """管理员重置用户密码（不经过旧密码）。"""
+        return requests.put(
+            self.admin_url(f"/users/{user_id}/reset-password"),
+            json={"type": "password", "value": password, "temporary": temporary},
+            headers=self.auth_headers(),
+            timeout=self.timeout,
+            verify=self.verify,
+        )
+
+    def delete_realm_role(self, role_name: str) -> requests.Response:
+        return requests.delete(
+            self.admin_url(f"/roles/{role_name}"),
+            headers=self.auth_headers(),
+            timeout=self.timeout,
+            verify=self.verify,
+        )
+
+    def create_user_raw(
+        self,
+        payload: dict | None = None,
+        raw_body: str | None = None,
+        content_type: str = "application/json",
+    ) -> requests.Response:
+        """原样提交创建用户请求，返回原始 Response。
+
+        输入契约用例要断言 400/415 这类状态码，而 create_user 只接受 201 否则抛异常，
+        所以单独留一个不校验结果的入口。
+        """
+        body = raw_body if raw_body is not None else json.dumps(payload or {})
+        return requests.post(
+            self.admin_url("/users"),
+            data=body,
+            headers={**self.auth_headers(), "Content-Type": content_type},
+            timeout=self.timeout,
+            verify=self.verify,
+        )
