@@ -37,6 +37,7 @@ class KeycloakClient:
         admin_password: str | None = None,
         timeout: int = 10,
         verify: bool = False,
+        token_realm: str | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.realm = realm
@@ -45,14 +46,23 @@ class KeycloakClient:
         self.admin_password = admin_password
         self.timeout = timeout
         self.verify = verify
+        # 取 token 的 realm 与要操作的 realm 可以不同：
+        # 多租户场景下用 master 管理员 token 去操作 qa-tenant-a，就靠这个参数。
+        self.token_realm = token_realm or realm
         self._token: str | None = None
 
     # ------------------------------------------------------------------ 基础
     @property
     def admin_token(self) -> str:
-        """管理员 token，懒加载并缓存。"""
+        """管理员 token，懒加载并缓存。
+
+        注意用 token_realm 而非 realm：多租户场景下管理员的凭据属于 master，
+        但操作的目标是某个租户，两者不能混。
+        """
         if self._token is None:
-            self._token = self.get_token(self.admin_user, self.admin_password)
+            self._token = self.get_token_response(
+                self.admin_user, self.admin_password, realm=self.token_realm
+            )["access_token"]
         return self._token
 
     def auth_headers(self, token: str | None = None) -> dict:
@@ -64,25 +74,86 @@ class KeycloakClient:
         """拼接当前 realm 下的 admin API 地址，例如 /users。"""
         return f"{self.base_url}/admin/realms/{self.realm}{suffix}"
 
+    def admin_url_of(self, realm: str, suffix: str = "") -> str:
+        """拼接任意 realm 的 admin API 地址（跨租户访问用例用）。"""
+        return f"{self.base_url}/admin/realms/{realm}{suffix}"
+
     # ------------------------------------------------------------------ 认证
+    def token_endpoint(self, realm: str | None = None) -> str:
+        """token 端点。默认是当前操作的 realm（用户在哪个租户就去哪登录）。"""
+        return f"{self.base_url}/realms/{realm or self.realm}/protocol/openid-connect/token"
+
     def get_token(self, username: str | None, password: str | None) -> str:
         """用用户名/密码换取 access_token。
 
         失败时抛 KeycloakError，消息里带上状态码与响应体，方便定位。
         """
-        url = f"{self.base_url}/realms/{self.realm}/protocol/openid-connect/token"
+        return self.get_token_response(username, password)["access_token"]
+
+    def get_token_response(
+        self,
+        username: str | None,
+        password: str | None,
+        realm: str | None = None,
+        scope: str | None = None,
+    ) -> dict:
+        """换取完整 token 响应（access_token / refresh_token / expires_in）。
+
+        会话类用例要用 refresh_token，所以单独留一个返回全量的入口。
+        realm 参数用于「租户 A 的用户去租户 B 登录」这类跨租户用例。
+        scope 传 "openid" 时 token 才能调 userinfo（否则 403 insufficient_scope）。
+        """
         data = {
             "client_id": self.client_id,
             "grant_type": "password",
             "username": username,
             "password": password,
         }
-        resp = requests.post(url, data=data, timeout=self.timeout, verify=self.verify)
+        if scope:
+            data["scope"] = scope
+        resp = requests.post(
+            self.token_endpoint(realm),
+            data=data,
+            timeout=self.timeout,
+            verify=self.verify,
+        )
         if resp.status_code != 200:
             raise KeycloakError(
                 f"获取 token 失败 [{resp.status_code}]: {resp.text}"
             )
-        return resp.json()["access_token"]
+        return resp.json()
+
+    def refresh_token(self, refresh_token: str, realm: str | None = None) -> requests.Response:
+        """用 refresh_token 换新 token，返回原始响应（用例自行断言）。"""
+        return requests.post(
+            self.token_endpoint(realm),
+            data={
+                "client_id": self.client_id,
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+            },
+            timeout=self.timeout,
+            verify=self.verify,
+        )
+
+    def logout(self, refresh_token: str, realm: str | None = None) -> requests.Response:
+        """注销会话（revoke），使该会话的 refresh_token 失效。"""
+        return requests.post(
+            f"{self.base_url}/realms/{realm or self.realm}/protocol/openid-connect/logout",
+            data={"client_id": self.client_id, "refresh_token": refresh_token},
+            timeout=self.timeout,
+            verify=self.verify,
+        )
+
+    def introspect(self, token: str, realm: str | None = None) -> dict:
+        """校验 token 是否仍然有效（active 字段）。比猜 access_token 是否失效更可靠。"""
+        resp = requests.post(
+            f"{self.base_url}/realms/{realm or self.realm}/protocol/openid-connect/token/introspect",
+            data={"client_id": self.client_id, "token": token},
+            timeout=self.timeout,
+            verify=self.verify,
+        )
+        return resp.json() if resp.status_code == 200 else {"active": False}
 
     # -------------------------------------------------------------- 用户管理
     def create_user(
@@ -173,3 +244,102 @@ class KeycloakClient:
         )
         resp.raise_for_status()
         return resp.json()
+
+    # -------------------------------------------------------------- 角色管理
+    def get_realm_role(self, role_name: str) -> requests.Response:
+        """按名称取 realm 角色；不存在返回 404。"""
+        return requests.get(
+            self.admin_url(f"/roles/{role_name}"),
+            headers=self.auth_headers(),
+            timeout=self.timeout,
+            verify=self.verify,
+        )
+
+    def create_realm_role(self, name: str, description: str = "") -> requests.Response:
+        """创建 realm 角色，成功 201，重名 409。"""
+        return requests.post(
+            self.admin_url("/roles"),
+            json={"name": name, "description": description},
+            headers=self.auth_headers(),
+            timeout=self.timeout,
+            verify=self.verify,
+        )
+
+    def get_user_realm_roles(self, user_id: str) -> list[dict]:
+        resp = requests.get(
+            self.admin_url(f"/users/{user_id}/role-mappings/realm"),
+            headers=self.auth_headers(),
+            timeout=self.timeout,
+            verify=self.verify,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def assign_realm_roles(self, user_id: str, roles: list[dict]) -> requests.Response:
+        """给用户分配 realm 角色（roles 是 role 表示的数组，不是字符串）。"""
+        return requests.post(
+            self.admin_url(f"/users/{user_id}/role-mappings/realm"),
+            json=roles,
+            headers=self.auth_headers(),
+            timeout=self.timeout,
+            verify=self.verify,
+        )
+
+    def remove_realm_roles(self, user_id: str, roles: list[dict]) -> requests.Response:
+        return requests.delete(
+            self.admin_url(f"/users/{user_id}/role-mappings/realm"),
+            json=roles,
+            headers=self.auth_headers(),
+            timeout=self.timeout,
+            verify=self.verify,
+        )
+
+    def get_client_by_client_id(self, client_id: str) -> dict | None:
+        """按 clientId 取 client（如 realm-management / admin-cli）。"""
+        resp = requests.get(
+            self.admin_url("/clients"),
+            params={"clientId": client_id},
+            headers=self.auth_headers(),
+            timeout=self.timeout,
+            verify=self.verify,
+        )
+        resp.raise_for_status()
+        clients = resp.json()
+        return clients[0] if clients else None
+
+    def get_client_role(self, client_uuid: str, role_name: str) -> dict:
+        resp = requests.get(
+            self.admin_url(f"/clients/{client_uuid}/roles/{role_name}"),
+            headers=self.auth_headers(),
+            timeout=self.timeout,
+            verify=self.verify,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def assign_client_roles(
+        self, user_id: str, client_uuid: str, roles: list[dict]
+    ) -> requests.Response:
+        return requests.post(
+            self.admin_url(f"/users/{user_id}/role-mappings/clients/{client_uuid}"),
+            json=roles,
+            headers=self.auth_headers(),
+            timeout=self.timeout,
+            verify=self.verify,
+        )
+
+    def make_realm_admin(self, user_id: str) -> None:
+        """把租户里的普通用户提升为「租户管理员」。
+
+        租户管理员 = realm-management 客户端里的 realm-admin 角色，
+        只能管自己 realm，不能建 realm（实测 403）——正是多租户要求的权限边界。
+        """
+        client = self.get_client_by_client_id("realm-management")
+        if not client:
+            raise KeycloakError("该 realm 缺少 realm-management 客户端")
+        role = self.get_client_role(client["id"], "realm-admin")
+        resp = self.assign_client_roles(user_id, client["id"], [role])
+        if resp.status_code != 204:
+            raise KeycloakError(
+                f"提升租户管理员失败 [{resp.status_code}]：{resp.text[:200]}"
+            )
