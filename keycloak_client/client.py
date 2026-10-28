@@ -148,14 +148,49 @@ class KeycloakClient:
         )
 
     def introspect(self, token: str, realm: str | None = None) -> dict:
-        """校验 token 是否仍然有效（active 字段）。比猜 access_token 是否失效更可靠。"""
+        """调用标准 introspect 端点校验 token。
+
+        ⚠️ 本项目默认的 admin-cli 调这个端点会返回 403 "Client not allowed."：
+        introspect 需要 confidential client + 客户端凭据，而 admin-cli 是公开客户端。
+        因此这里不再把失败静默翻译成 {"active": False}——那会让「没权限」伪装成
+        「token 已失效」，是假阴性陷阱。真要用请先换一个机密 client 并配好凭据。
+
+        需要「token 还能不能用」的结论时，请用 token_is_valid()。
+        """
         resp = requests.post(
             f"{self.base_url}/realms/{realm or self.realm}/protocol/openid-connect/token/introspect",
             data={"client_id": self.client_id, "token": token},
             timeout=self.timeout,
             verify=self.verify,
         )
-        return resp.json() if resp.status_code == 200 else {"active": False}
+        if resp.status_code != 200:
+            raise KeycloakError(
+                f"introspect 不可用 [{resp.status_code}]：{resp.text[:200]}。"
+                f"当前 client '{self.client_id}' 没有自省权限，改用 token_is_valid()"
+            )
+        return resp.json()
+
+    def token_is_valid(self, access_token: str) -> bool:
+        """判断 access token 是否仍然有效（未过期 / 用户未被禁用 / 会话未被撤销）。
+
+        做法是拿它去打一个「需要认证但没有权限」的 admin 接口，按状态码区分：
+            403 → 认得这个身份，只是没权限 → token 有效
+            401 → 没认出身份 → token 无效、已过期或被撤销
+        这不依赖 introspect 端点，也不依赖 realm 的 client 配置，最贴近真实调用路径。
+        """
+        resp = requests.get(
+            self.admin_url("/users"),
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=self.timeout,
+            verify=self.verify,
+        )
+        if resp.status_code == 403:
+            return True
+        if resp.status_code == 401:
+            return False
+        raise KeycloakError(
+            f"无法判断 token 有效性：预期 401/403，实得 {resp.status_code}：{resp.text[:200]}"
+        )
 
     # -------------------------------------------------------------- 用户管理
     def create_user(
@@ -166,10 +201,13 @@ class KeycloakClient:
         first_name: str | None = None,
         last_name: str | None = None,
         enabled: bool = True,
+        temporary_password: bool = False,
     ) -> str:
         """创建用户，返回新用户的 id。
 
         id 从响应头 Location 末尾截取（形如 .../users/{id}）。
+        temporary_password=True 时首次登录会被要求立即改密（UPDATE_PASSWORD），
+        对应管理员给新员工发初始密码的场景。
         """
         # 该 realm 的 user profile 将 email/firstName/lastName 设为必填，
         # 缺任意一个登录时会报 "Account is not fully set up"，故这里给默认值兜底。
@@ -182,7 +220,7 @@ class KeycloakClient:
         }
         if password:
             payload["credentials"] = [
-                {"type": "password", "value": password, "temporary": False}
+                {"type": "password", "value": password, "temporary": temporary_password}
             ]
         resp = requests.post(
             self.admin_url("/users"),
@@ -246,6 +284,35 @@ class KeycloakClient:
         )
         resp.raise_for_status()
         return resp.json()
+
+    # -------------------------------------------------------------- 会话管理
+    def get_sessions(self, user_id: str) -> list[dict]:
+        """列出该用户当前的所有在线会话（每次登录一个 session）。"""
+        resp = requests.get(
+            self.admin_url(f"/users/{user_id}/sessions"),
+            headers=self.auth_headers(),
+            timeout=self.timeout,
+            verify=self.verify,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def logout_user_sessions(self, user_id: str) -> requests.Response:
+        """踢下线：撤销该用户全部会话，成功 204。
+
+        与用户自助 logout 的区别：这个不需要 refresh_token，
+        是管理员侧的「强制下线」，常用于禁用账号、疑似被盗、改密后强制重登。
+        """
+        return requests.post(
+            self.admin_url(f"/users/{user_id}/logout"),
+            headers=self.auth_headers(),
+            timeout=self.timeout,
+            verify=self.verify,
+        )
+
+    def set_user_enabled(self, user_id: str, enabled: bool) -> requests.Response:
+        """启用 / 禁用用户（语义化包装，等价 update_user(enabled=...)）。"""
+        return self.update_user(user_id, enabled=enabled)
 
     # -------------------------------------------------------------- 角色管理
     def get_realm_role(self, role_name: str) -> requests.Response:

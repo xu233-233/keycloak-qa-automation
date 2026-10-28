@@ -94,9 +94,19 @@ class PlatformAdmin:
 
     def set_realm_enabled(self, realm: str, enabled: bool) -> requests.Response:
         """停用 / 恢复租户。停用后该租户的用户无法换 token。"""
+        return self.update_realm(realm, enabled=enabled)
+
+    def update_realm(self, realm: str, **fields) -> requests.Response:
+        """局部更新 realm 配置（PUT 是 merge 语义，只改传入的字段）。
+
+        常用于时间窗口类用例：把 accessTokenLifespan 压到几秒，
+        或设 notBefore 撤销该 realm 已签发的令牌。
+        改动会立刻生效且无需重启，所以实验请放在临时 realm 里做，
+        不要动 student-qa —— 否则其它用例的 token 会提前过期。
+        """
         return requests.put(
             f"{self.base_url}/admin/realms/{realm}",
-            json={"enabled": enabled},
+            json=fields,
             headers=self.headers,
             timeout=self.timeout,
         )

@@ -88,3 +88,34 @@ def kc_of(tenants):
         return cache[realm]
 
     return _get
+
+
+# ------------------------------------------------------------ 时间窗口测试支持
+@pytest.fixture()
+def short_lived_realm(platform):
+    """临时 realm，access token 寿命压到 2 秒，专供「令牌过期」类用例。
+
+    为什么不直接改 student-qa：accessTokenLifespan 是 realm 级全局配置，
+    改小会让同一 realm 所有 token 提前失效，污染其它用例。
+    这里每次新建一个一次性 realm，用完即删，名字带随机后缀避免并发冲突。
+    """
+    name = f"qa-state-{uuid.uuid4().hex[:6]}"
+    created = platform.create_realm(name)
+    if created.status_code != 201:
+        raise RuntimeError(f"创建临时租户失败 [{created.status_code}]：{created.text[:200]}")
+
+    # 3 秒：留够「签发后立刻验证仍然有效」的余量，又不用等太久
+    platform.update_realm(name, accessTokenLifespan=3)
+
+    client = KeycloakClient(
+        base_url=BASE_URL,
+        realm=name,
+        token_realm="master",
+        admin_user=MASTER_ADMIN_USER,
+        admin_password=MASTER_ADMIN_PASSWORD,
+    )
+    try:
+        yield client
+    finally:
+        platform.delete_realm(name)
+
